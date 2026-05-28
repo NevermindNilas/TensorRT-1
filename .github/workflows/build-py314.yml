@@ -1,12 +1,13 @@
 name: build-py314-bindings
 
-# Proof-of-concept: can the TensorRT Python bindings (old build flow) be
-# compiled for CPython 3.14 (cp314)? Builds against the public TensorRT 10.16
-# GA tarball (headers + libnvinfer.so). No GPU is needed: the bindings only
-# need CUDA *headers* at compile time and link the closed libnvinfer.
+# Build the TensorRT Python bindings (old build flow) for CPython 3.14 (cp314),
+# which NVIDIA ships no official wheel for. Compiles the Apache-2.0 pybind11
+# binding source against the public TensorRT 10.16 GA tarball (headers +
+# libnvinfer.so), assembles a standalone wheel (bindings + bundled closed libs)
+# and publishes it as a GitHub Release.
 #
-# Matrix runs 3.13 (known-good control) and 3.14 (the question). If 3.13 is
-# green and 3.14 is red, cp314 is the culprit.
+# No GPU needed to BUILD (CUDA headers only; links the closed libnvinfer).
+# The resulting wheel needs an NVIDIA GPU + driver + CUDA runtime to import/run.
 
 on:
   workflow_dispatch:
@@ -20,6 +21,9 @@ env:
   TRT_VER: "10.16.0.72"
   TRT_TARBALL: "TensorRT-10.16.0.72.Linux.x86_64-gnu.cuda-13.2.tar.gz"
   TRT_URL: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.16.0/tars/TensorRT-10.16.0.72.Linux.x86_64-gnu.cuda-13.2.tar.gz"
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -137,15 +141,106 @@ jobs:
           make -j"$(nproc)" VERBOSE=1
 
       - name: Show built artifacts
-        if: always()
         run: |
           set -eux
-          find python/build -name "tensorrt*.so" -exec ls -la {} \; || true
+          find python/build -name "tensorrt*.so" -exec ls -la {} \;
 
-      - name: Upload .so artifact
-        if: always()
+      - name: Assemble standalone cp3${{ matrix.py_minor }} wheel
+        run: |
+          set -eux
+          PYV=3.${{ matrix.py_minor }}
+          PY=python${PYV}
+          TRT="/opt/TensorRT-${TRT_VER}"
+          # pip/wheel tooling inside the target interpreter
+          ${PY} -m ensurepip --upgrade
+          ${PY} -m pip install --upgrade pip wheel
+
+          WHL=/tmp/whl
+          rm -rf "${WHL}"
+          mkdir -p "${WHL}/tensorrt" "${WHL}/tensorrt_libs" \
+                   "${WHL}/tensorrt-${TRT_VER}.dist-info"
+
+          # 1) Processed __init__ (fills ##TOKENS##)
+          ${PY} python/scripts/process_wheel_template.py \
+            --src-dir python/packaging/bindings_wheel \
+            --dst-dir "${WHL}" \
+            --filepath tensorrt/__init__.py \
+            --trt-module tensorrt \
+            --trt-py-version "${TRT_VER}" \
+            --cuda-version 13.2 \
+            --trt-version 10.16.0 \
+            --trt-nvinfer-name nvinfer \
+            --trt-onnxparser-name nvonnxparser \
+            --plugin-disabled 0
+          # Fail if any template token survived
+          ! grep -q '##' "${WHL}/tensorrt/__init__.py"
+
+          # 2) The cp3xx binding + closed TRT libs (rpath is $ORIGIN/../tensorrt_libs).
+          # zipfile follows symlinks, so copy ONE dereferenced real file per
+          # loadable name (soname for core libs; exact name for builder resources)
+          # to avoid 3x duplication blowing past the release asset size limit.
+          cp python/build/tensorrt/tensorrt.so "${WHL}/tensorrt/"
+          ( cd "${TRT}/lib"
+            for f in *.so.10; do
+              [ -e "$f" ] && cp -L "$f" "${WHL}/tensorrt_libs/"
+            done
+            for f in libnvinfer_builder_resource*.so.10.16.0; do
+              [ -e "$f" ] && cp -L "$f" "${WHL}/tensorrt_libs/"
+            done
+          )
+          printf '# bundled closed-source TensorRT runtime libraries\n' \
+            > "${WHL}/tensorrt_libs/__init__.py"
+          echo "=== bundled libs ==="; ls -la "${WHL}/tensorrt_libs/"
+          du -sh "${WHL}/tensorrt_libs/"
+
+          # 3) Wheel metadata (platform tag — installable from file, not PyPI)
+          MD="${WHL}/tensorrt-${TRT_VER}.dist-info/METADATA"
+          {
+            printf 'Metadata-Version: 2.1\n'
+            printf 'Name: tensorrt\n'
+            printf 'Version: %s\n' "${TRT_VER}"
+            printf 'Summary: UNOFFICIAL CPython %s build of TensorRT 10.16 bindings (POC)\n' "${PYV}"
+            printf 'Home-page: https://github.com/NevermindNilas/tensorrt-py3.14\n'
+            printf 'License: Apache-2.0 bindings + NVIDIA proprietary EULA for libs\n'
+          } > "${MD}"
+          WH="${WHL}/tensorrt-${TRT_VER}.dist-info/WHEEL"
+          {
+            printf 'Wheel-Version: 1.0\n'
+            printf 'Generator: tas-cp314-poc\n'
+            printf 'Root-Is-Purelib: false\n'
+            printf 'Tag: cp%s-cp%s-linux_x86_64\n' "${{ matrix.py_minor }}" "${{ matrix.py_minor }}"
+          } > "${WH}"
+
+          # 4) Pack
+          mkdir -p dist
+          ${PY} -m wheel pack "${WHL}" -d dist
+          echo "=== built wheel ==="
+          ls -la dist/
+          ${PY} -m zipfile -l dist/*.whl | head -40
+
+      - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tensorrt-cp3${{ matrix.py_minor }}-binding
-          path: python/build/**/*.so
-          if-no-files-found: warn
+          name: tensorrt-cp3${{ matrix.py_minor }}-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.TRT_VER }}-cp3${{ matrix.py_minor }}
+          name: TensorRT ${{ env.TRT_VER }} bindings for CPython 3.${{ matrix.py_minor }} (unofficial)
+          body: |
+            **Unofficial** proof-of-concept build of the NVIDIA TensorRT
+            ${{ env.TRT_VER }} Python bindings for **CPython 3.${{ matrix.py_minor }}** (`cp3${{ matrix.py_minor }}`),
+            which NVIDIA does not ship an official wheel for.
+
+            - Bindings (pybind11) compiled from the Apache-2.0 OSS source.
+            - Bundles the closed-source TensorRT runtime libs (NVIDIA EULA applies).
+            - Built on a CPU runner (no GPU needed to build); **requires an
+              NVIDIA GPU + driver + CUDA runtime at import/runtime**.
+            - Platform-tagged `linux_x86_64`: install from file, e.g.
+              `pip install ./tensorrt-${{ env.TRT_VER }}-cp3${{ matrix.py_minor }}-cp3${{ matrix.py_minor }}-linux_x86_64.whl`
+            - Not affiliated with or endorsed by NVIDIA.
+          files: dist/*.whl
+          fail_on_unmatched_files: true
