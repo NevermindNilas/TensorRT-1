@@ -67,7 +67,15 @@ jobs:
         run: |
           set -eux
           cd /opt
-          wget -q "${TRT_URL}"
+          # Big (~1.8GB) file off NVIDIA CDN drops intermittently; retry + resume.
+          for attempt in 1 2 3 4 5; do
+            wget --continue --tries=3 --timeout=60 --waitretry=15 \
+                 -O "${TRT_TARBALL}" "${TRT_URL}" && break
+            echo "download attempt ${attempt} failed; retrying"; sleep 10
+          done
+          # Fail loudly if the archive is short/corrupt rather than letting tar guess.
+          test "$(stat -c%s "${TRT_TARBALL}")" -gt 1000000000
+          gzip -t "${TRT_TARBALL}"
           tar -xf "${TRT_TARBALL}"
           ls "TensorRT-${TRT_VER}"
           echo "=== include has NvInfer / NvOnnxParser? ==="
