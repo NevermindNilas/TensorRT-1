@@ -1,0 +1,69 @@
+name: auto-cp314
+
+# Weekly: detect the latest publicly *buildable* TensorRT version (libs on
+# pypi.nvidia.com + a public GA tarball + an upstream OSS source ref) and, if
+# it is newer than what we've already released, build + publish the cp314
+# wheels by calling build-py314.yml.
+#
+# Retires automatically: once NVIDIA ships an official cp314 wheel
+# (tensorrt-cu13-bindings), the detector reports `official=true`, an issue is
+# opened, and no build runs. At that point delete/disable this workflow.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-24.04
+    outputs:
+      should_build: ${{ steps.d.outputs.should_build }}
+      official: ${{ steps.d.outputs.official }}
+      trt_version: ${{ steps.d.outputs.trt_version }}
+      trt_url_seg: ${{ steps.d.outputs.trt_url_seg }}
+      cuda_suffix: ${{ steps.d.outputs.cuda_suffix }}
+      oss_ref: ${{ steps.d.outputs.oss_ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: d
+        name: Detect latest buildable version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORK_REPO: ${{ github.repository }}
+        run: python .github/scripts/detect_latest.py
+
+      - name: Open retire issue (NVIDIA shipped official cp314)
+        if: steps.d.outputs.official == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          title="NVIDIA now ships official cp314 — retire auto-build"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --json title --jq "[.[] | select(.title==\"$title\")] | length")
+          if [ "$existing" = "0" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body \
+              "The detector found an official \`cp314\` wheel in NVIDIA's \`tensorrt-cu13-bindings\` index, so this fork's bindings are no longer needed. Disable or delete \`.github/workflows/auto-cp314.yml\`."
+          fi
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.should_build == 'true'
+    uses: ./.github/workflows/build-py314.yml
+    with:
+      trt_version: ${{ needs.detect.outputs.trt_version }}
+      trt_url_seg: ${{ needs.detect.outputs.trt_url_seg }}
+      trt_short: ${{ needs.detect.outputs.trt_url_seg }}
+      cuda_suffix: ${{ needs.detect.outputs.cuda_suffix }}
+      oss_ref: ${{ needs.detect.outputs.oss_ref }}
+      run_linux: true
+      run_windows: true
+    secrets: inherit

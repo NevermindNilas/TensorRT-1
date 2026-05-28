@@ -1,39 +1,42 @@
 name: build-py314-bindings
 
-# Build the TensorRT 10.16 Python bindings for CPython 3.14 (cp314), which
-# NVIDIA ships no official wheel for. Compiles the Apache-2.0 pybind11 binding
-# source against the public TensorRT 10.16 GA package (headers + import libs),
-# on Linux (x86_64) and Windows (amd64), and publishes the wheels in one
-# GitHub Release.
+# Build the TensorRT Python bindings for CPython 3.14 (cp314), which NVIDIA
+# ships no official wheel for. Compiles the Apache-2.0 pybind11 binding source
+# against the public TensorRT GA package (headers + import libs) on Linux
+# (x86_64) and Windows (amd64), and publishes the wheels in one GitHub Release.
 #
-# These are BINDINGS-ONLY wheels (the genuinely cp-version-specific part).
-# The closed TensorRT runtime libs are ~4GB and exceed GitHub's 2GB asset cap,
-# so they are NOT bundled. Install NVIDIA's official `tensorrt-libs` (or put a
-# TensorRT 10.16 install on LD_LIBRARY_PATH / PATH) alongside.
+# Version-parameterized + reusable (workflow_call): the auto-cp314 scheduler
+# calls this with the latest publicly buildable version. A bare manual dispatch
+# uses the defaults below (the current target). When `oss_ref` is set, the
+# binding *source* is pulled from that upstream NVIDIA/TensorRT tag/branch at
+# build time, so a new major version (e.g. 11.0) builds without re-vendoring.
 #
-# No GPU needed to BUILD (CUDA headers only; links the closed nvinfer import
-# libs). Importing the wheel needs an NVIDIA GPU + driver + the runtime libs.
+# These are BINDINGS-ONLY wheels. The closed TensorRT runtime libs (~1.9GB)
+# exceed GitHub's 2GB asset cap and are NOT bundled; the wheel's Requires-Dist
+# pulls `tensorrt-cu13-libs` from `--extra-index-url https://pypi.nvidia.com`.
+# No GPU needed to BUILD; importing needs an NVIDIA GPU + driver + runtime libs.
 
 on:
   workflow_dispatch:
     inputs:
-      pybind11_ref:
-        description: "pybind11 git ref (tag/branch) to compile against"
-        default: "v2.13.6"
-        type: string
-      run_linux:
-        description: "Build the Linux wheel"
-        default: true
-        type: boolean
-      run_windows:
-        description: "Build the Windows wheel"
-        default: true
-        type: boolean
-
-env:
-  TRT_VER: "10.16.1.11"
-  TRT_MAJOR: "10"
-  PY_MINOR: "14"
+      trt_version:   { description: "Full TRT version (e.g. 10.16.1.11)", default: "10.16.1.11", type: string }
+      trt_url_seg:   { description: "GA download path segment (e.g. 10.16.1)", default: "10.16.1", type: string }
+      trt_short:     { description: "TRT version token for __init__ (e.g. 10.16.1)", default: "10.16.1", type: string }
+      cuda_suffix:   { description: "GA package cuda suffix (e.g. 13.2)", default: "13.2", type: string }
+      oss_ref:       { description: "Upstream OSS ref for binding source; empty = vendored python/", default: "", type: string }
+      pybind11_ref:  { description: "pybind11 git ref to compile against", default: "v2.13.6", type: string }
+      run_linux:     { description: "Build the Linux wheel", default: true, type: boolean }
+      run_windows:   { description: "Build the Windows wheel", default: true, type: boolean }
+  workflow_call:
+    inputs:
+      trt_version:   { required: true, type: string }
+      trt_url_seg:   { required: true, type: string }
+      trt_short:     { required: true, type: string }
+      cuda_suffix:   { default: "13.2", type: string }
+      oss_ref:       { default: "", type: string }
+      pybind11_ref:  { default: "v2.13.6", type: string }
+      run_linux:     { default: true, type: boolean }
+      run_windows:   { default: true, type: boolean }
 
 permissions:
   contents: write
@@ -44,10 +47,14 @@ jobs:
     if: ${{ inputs.run_linux }}
     runs-on: ubuntu-24.04
     container:
-      image: nvidia/cuda:13.2.0-devel-ubuntu24.04
+      image: nvidia/cuda:${{ inputs.cuda_suffix }}.0-devel-ubuntu24.04
     env:
-      TRT_TARBALL: "TensorRT-10.16.1.11.Linux.x86_64-gnu.cuda-13.2.tar.gz"
-      TRT_URL: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.16.1/tars/TensorRT-10.16.1.11.Linux.x86_64-gnu.cuda-13.2.tar.gz"
+      PY_MINOR: "14"
+      TRT_VER: ${{ inputs.trt_version }}
+      TRT_SHORT: ${{ inputs.trt_short }}
+      CUDA_SUFFIX: ${{ inputs.cuda_suffix }}
+      TRT_TARBALL: "TensorRT-${{ inputs.trt_version }}.Linux.x86_64-gnu.cuda-${{ inputs.cuda_suffix }}.tar.gz"
+      TRT_URL: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/${{ inputs.trt_url_seg }}/tars/TensorRT-${{ inputs.trt_version }}.Linux.x86_64-gnu.cuda-${{ inputs.cuda_suffix }}.tar.gz"
     steps:
       - name: Install git + base tooling (needed before checkout)
         run: |
@@ -60,6 +67,17 @@ jobs:
 
       - name: Checkout fork
         uses: actions/checkout@v4
+
+      - name: Sync binding source from upstream OSS ref
+        if: ${{ inputs.oss_ref != '' }}
+        run: |
+          set -eux
+          git clone --depth 1 --branch "${{ inputs.oss_ref }}" \
+            https://github.com/NVIDIA/TensorRT /tmp/ossrc
+          rm -rf python
+          cp -r /tmp/ossrc/python python
+          test -f python/scripts/process_wheel_template.py
+          test -d python/packaging/bindings_wheel
 
       - name: Install CMake >= 3.27
         run: |
@@ -85,7 +103,6 @@ jobs:
           df -h /opt /
           # aria2c: multi-connection + robust resume — the NVIDIA CDN drops
           # single-stream wget on this ~1.8GB file intermittently.
-          # file-allocation=none: skip preallocation (faster start, no disk prealloc stall)
           aria2c -x16 -s16 --max-tries=10 --retry-wait=10 --timeout=60 \
                  --max-connection-per-server=16 --continue=true \
                  --file-allocation=none --summary-interval=10 \
@@ -153,11 +170,26 @@ jobs:
     if: ${{ inputs.run_windows }}
     runs-on: windows-2022
     env:
-      TRT_ZIP: "TensorRT-10.16.1.11.Windows.amd64.cuda-13.2.zip"
-      TRT_URL: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.16.1/zip/TensorRT-10.16.1.11.Windows.amd64.cuda-13.2.zip"
+      PY_MINOR: "14"
+      TRT_VER: ${{ inputs.trt_version }}
+      TRT_SHORT: ${{ inputs.trt_short }}
+      CUDA_SUFFIX: ${{ inputs.cuda_suffix }}
+      TRT_ZIP: "TensorRT-${{ inputs.trt_version }}.Windows.amd64.cuda-${{ inputs.cuda_suffix }}.zip"
+      TRT_URL: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/${{ inputs.trt_url_seg }}/zip/TensorRT-${{ inputs.trt_version }}.Windows.amd64.cuda-${{ inputs.cuda_suffix }}.zip"
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
+
+      - name: Sync binding source from upstream OSS ref
+        if: ${{ inputs.oss_ref != '' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git clone --depth 1 --branch "${{ inputs.oss_ref }}" `
+            https://github.com/NVIDIA/TensorRT "$env:RUNNER_TEMP\ossrc"
+          Remove-Item -Recurse -Force python
+          Copy-Item -Recurse "$env:RUNNER_TEMP\ossrc\python" python
+          if (-not (Test-Path python\scripts\process_wheel_template.py)) { throw "no template after sync" }
 
       - name: Set up Python 3.${{ env.PY_MINOR }}
         uses: actions/setup-python@v5
@@ -167,9 +199,9 @@ jobs:
       - name: Install CUDA toolkit (headers for compile)
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
-          cuda: "13.2.0"
+          cuda: "${{ inputs.cuda_suffix }}.0"
           method: "network"
-          # Full toolkit: subpackage split for 13.2 omits include/crt/* (host_defines.h)
+          # Full toolkit: subpackage split omits include/crt/* (host_defines.h)
           sub-packages: '[]'
 
       - name: Verify CUDA headers (crt/)
@@ -217,7 +249,7 @@ jobs:
           $cuda = "$env:CUDA_PATH" -replace '\\','/'
           # $env: refs don't expand reliably in unquoted -D args -> use locals
           $pymin = $env:PY_MINOR
-          $trtmaj = $env:TRT_MAJOR
+          $trtmaj = $env:TRT_VER.Split('.')[0]
           New-Item -ItemType Directory -Force -Path python\build | Out-Null
           cd python\build
           cmake .. -G "Visual Studio 17 2022" -A x64 `
@@ -254,6 +286,9 @@ jobs:
     needs: [linux, windows]
     if: always()
     runs-on: ubuntu-24.04
+    env:
+      PY_MINOR: "14"
+      TRT_VER: ${{ inputs.trt_version }}
     steps:
       - name: Download wheels
         uses: actions/download-artifact@v4
@@ -276,16 +311,17 @@ jobs:
             NVIDIA ships no official wheel for.
 
             **Bindings-only** wheels (Linux x86_64 + Windows amd64). The closed
-            TensorRT runtime libs (~4GB) exceed GitHub's 2GB asset cap and are
-            **not bundled** — install NVIDIA's official `tensorrt-libs`, or put a
-            TensorRT ${{ env.TRT_VER }} install on `LD_LIBRARY_PATH` (Linux) /
-            `PATH` (Windows) so the bindings can load `nvinfer`.
+            TensorRT runtime libs (~1.9GB) exceed GitHub's 2GB asset cap and are
+            **not bundled** — the wheel's `Requires-Dist` pulls
+            `tensorrt-cu13-libs==${{ env.TRT_VER }}` from NVIDIA's index:
+
+            ```
+            pip install <wheel-url> --extra-index-url https://pypi.nvidia.com
+            ```
 
             - pybind11 binding source (Apache-2.0) compiled against the TRT GA package.
             - Built on CPU runners (no GPU to build); needs an NVIDIA GPU + driver
               + the runtime libs to import/run.
-            - Platform-tagged wheels: install from file, e.g.
-              `pip install ./tensorrt-${{ env.TRT_VER }}-cp3${{ env.PY_MINOR }}-cp3${{ env.PY_MINOR }}-win_amd64.whl`
             - Not affiliated with or endorsed by NVIDIA.
           files: artifacts/*.whl
           fail_on_unmatched_files: false

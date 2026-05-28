@@ -9,6 +9,8 @@ MODULE="$1"
 TAG="$2"
 PY="${3:-python3}"
 TRT_VER="${TRT_VER:-10.16.1.11}"
+TRT_SHORT="${TRT_SHORT:-10.16.1}"
+CUDA_SUFFIX="${CUDA_SUFFIX:-13.2}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 WHL="$(mktemp -d)/whl"
@@ -20,7 +22,7 @@ mkdir -p "${WHL}/tensorrt" "${WHL}/tensorrt-${TRT_VER}.dist-info"
   --dst-dir "${WHL}" \
   --filepath tensorrt/__init__.py \
   --trt-module tensorrt --trt-py-version "${TRT_VER}" \
-  --cuda-version 13.2 --trt-version 10.16.1 \
+  --cuda-version "${CUDA_SUFFIX}" --trt-version "${TRT_SHORT}" \
   --trt-nvinfer-name nvinfer --trt-onnxparser-name nvonnxparser --plugin-disabled 0
 ! grep -q '##' "${WHL}/tensorrt/__init__.py"
 
@@ -30,7 +32,7 @@ cp "${MODULE}" "${WHL}/tensorrt/$(basename "${MODULE}")"
   printf 'Metadata-Version: 2.1\n'
   printf 'Name: tensorrt\n'
   printf 'Version: %s\n' "${TRT_VER}"
-  printf 'Summary: Unofficial cp3%s build of TensorRT 10.16 bindings (bindings-only)\n' "${PY_MINOR:-}"
+  printf 'Summary: Unofficial cp3%s build of TensorRT %s bindings (bindings-only)\n' "${PY_MINOR:-}" "${TRT_SHORT}"
   printf 'Home-page: https://github.com/NevermindNilas/tensorrt-py3.14\n'
   printf 'License: Apache-2.0 bindings; NVIDIA EULA for separately-provided libs\n'
   printf 'Requires-Python: >=3.%s,<3.%s\n' "${PY_MINOR}" "$((PY_MINOR + 1))"

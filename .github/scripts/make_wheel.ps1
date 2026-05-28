@@ -8,6 +8,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $TrtVer = $env:TRT_VER; if (-not $TrtVer) { $TrtVer = "10.16.1.11" }
+$TrtShort = $env:TRT_SHORT; if (-not $TrtShort) { $TrtShort = "10.16.1" }
+$CudaSuffix = $env:CUDA_SUFFIX; if (-not $CudaSuffix) { $CudaSuffix = "13.2" }
 $repo = $env:GITHUB_WORKSPACE
 $whl = Join-Path $env:RUNNER_TEMP "whl"
 Remove-Item -Recurse -Force $whl -ErrorAction SilentlyContinue
@@ -17,7 +19,7 @@ python "$repo\python\scripts\process_wheel_template.py" `
   --src-dir "$repo\python\packaging\bindings_wheel" --dst-dir "$whl" `
   --filepath tensorrt/__init__.py `
   --trt-module tensorrt --trt-py-version $TrtVer `
-  --cuda-version 13.2 --trt-version 10.16.1 `
+  --cuda-version $CudaSuffix --trt-version $TrtShort `
   --trt-nvinfer-name nvinfer --trt-onnxparser-name nvonnxparser --plugin-disabled 0
 if (Select-String -Path "$whl\tensorrt\__init__.py" -Pattern '##' -Quiet) { throw "unfilled template token" }
 
@@ -29,7 +31,7 @@ $next = [int]$env:PY_MINOR + 1
   "Metadata-Version: 2.1",
   "Name: tensorrt",
   "Version: $TrtVer",
-  "Summary: Unofficial cp3$env:PY_MINOR build of TensorRT 10.16 bindings (bindings-only)",
+  "Summary: Unofficial cp3$env:PY_MINOR build of TensorRT $TrtShort bindings (bindings-only)",
   "Home-page: https://github.com/NevermindNilas/tensorrt-py3.14",
   "License: Apache-2.0 bindings; NVIDIA EULA for separately-provided libs",
   "Requires-Python: >=3.$env:PY_MINOR,<3.$next",
