@@ -46,7 +46,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
           apt-get install -y --no-install-recommends \
-            git ca-certificates wget xz-utils tar \
+            git ca-certificates wget aria2 xz-utils tar \
             software-properties-common gnupg build-essential pkg-config
 
       - name: Checkout fork
@@ -73,11 +73,11 @@ jobs:
         run: |
           set -eux
           cd /opt
-          for attempt in 1 2 3 4 5; do
-            wget --continue --tries=3 --timeout=60 --waitretry=15 \
-                 -O "${TRT_TARBALL}" "${TRT_URL}" && break
-            echo "download attempt ${attempt} failed; retrying"; sleep 10
-          done
+          # aria2c: multi-connection + robust resume — the NVIDIA CDN drops
+          # single-stream wget on this ~1.8GB file intermittently.
+          aria2c -x16 -s16 --max-tries=10 --retry-wait=10 --timeout=60 \
+                 --max-connection-per-server=16 --continue=true \
+                 -o "${TRT_TARBALL}" "${TRT_URL}"
           test "$(stat -c%s "${TRT_TARBALL}")" -gt 1000000000
           gzip -t "${TRT_TARBALL}"
           tar -xf "${TRT_TARBALL}"
@@ -183,17 +183,18 @@ jobs:
           Copy-Item "$base\include\*" "$dest\include\" -Recurse -Force
           # old flow looks for pyconfig.h under include/win/python<ver>/
           Copy-Item "$base\include\pyconfig.h" "$dest\include\win\python$pyv\" -Force
-          # python3XX.lib (no dot)
-          $lib = "python$($env:PY_MINOR -replace '\.','')"
-          Copy-Item "$base\libs\python3$env:PY_MINOR.lib" "$dest\lib\$lib.lib" -Force
+          # CMake's old flow wants python3<minor>.lib (PYTHON_LIB_NAME)
+          Copy-Item "$base\libs\python3$env:PY_MINOR.lib" "$dest\lib\python3$env:PY_MINOR.lib" -Force
           Get-ChildItem -Recurse "$dest" -Include Python.h,pyconfig.h,*.lib | Select-Object FullName
 
       - name: Configure + build bindings (MSVC, old python flow)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $trt = "$env:RUNNER_TEMP\TensorRT-$env:TRT_VER"
-          $ext = "$env:RUNNER_TEMP\ext"
+          # CMake parses backslashes in -D values as escapes -> use forward slashes
+          $trt = "$env:RUNNER_TEMP/TensorRT-$env:TRT_VER" -replace '\\','/'
+          $ext = "$env:RUNNER_TEMP/ext" -replace '\\','/'
+          $cuda = "$env:CUDA_PATH" -replace '\\','/'
           New-Item -ItemType Directory -Force -Path python\build | Out-Null
           cd python\build
           cmake .. -G "Visual Studio 17 2022" -A x64 `
@@ -201,10 +202,10 @@ jobs:
             -DTENSORRT_MODULE=tensorrt `
             -DPYTHON_MAJOR_VERSION=3 -DPYTHON_MINOR_VERSION=$env:PY_MINOR `
             -DTARGET=x86_64 -DEXT_PATH="$ext" `
-            -DTENSORRT_ROOT="$trt" -DTENSORRT_LIBPATH="$trt\lib" -DTENSORRT_BUILD="$trt\lib" `
+            -DTENSORRT_ROOT="$trt" -DTENSORRT_LIBPATH="$trt/lib" -DTENSORRT_BUILD="$trt/lib" `
             -DTENSORRT_MAJOR_VERSION=$env:TRT_MAJOR `
             -DTRT_NVINFER_NAME=nvinfer -DTRT_ONNXPARSER_NAME=nvonnxparser `
-            -DCUDA_INCLUDE_DIRS="$env:CUDA_PATH\include" -DONNX_INC_DIR="$trt\include"
+            -DCUDA_INCLUDE_DIRS="$cuda/include" -DONNX_INC_DIR="$trt/include"
           cmake --build . --config Release -- -m
           Get-ChildItem -Recurse -Include tensorrt.dll,tensorrt.pyd | Select-Object FullName,Length
 
