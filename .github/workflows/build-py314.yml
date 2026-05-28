@@ -29,7 +29,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        py_minor: ["13", "14"]
+        # cp313 already ships officially; it was only a control to prove the
+        # harness. cp314 built green, so the control is moot — cp314 only.
+        py_minor: ["14"]
     steps:
       - name: Install git + base tooling (needed before checkout)
         run: |
