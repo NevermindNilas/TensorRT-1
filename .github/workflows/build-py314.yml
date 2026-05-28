@@ -169,7 +169,8 @@ jobs:
         with:
           cuda: "13.2.0"
           method: "network"
-          sub-packages: '["cudart"]'
+          # nvcc bundles include/crt/* (host_defines.h) that cuda_runtime_api.h needs
+          sub-packages: '["cudart", "nvcc"]'
 
       - name: Fetch pybind11 ${{ inputs.pybind11_ref }}
         run: git clone --depth 1 --branch "${{ inputs.pybind11_ref }}" https://github.com/pybind/pybind11 "$env:RUNNER_TEMP\ext\pybind11"
