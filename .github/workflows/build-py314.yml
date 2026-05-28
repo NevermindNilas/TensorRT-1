@@ -152,11 +152,11 @@ jobs:
           python-version: "3.${{ env.PY_MINOR }}"
 
       - name: Install CUDA toolkit (headers for compile)
-        uses: Jimver/cuda-toolkit@v0.2.21
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: "13.2.0"
           method: "network"
-          sub-packages: '["cudart", "nvcc"]'
+          sub-packages: '["cudart"]'
 
       - name: Fetch pybind11 ${{ inputs.pybind11_ref }}
         run: git clone --depth 1 --branch "${{ inputs.pybind11_ref }}" https://github.com/pybind/pybind11 "$env:RUNNER_TEMP\ext\pybind11"

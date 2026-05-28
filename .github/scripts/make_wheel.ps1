@@ -24,13 +24,16 @@ if (Select-String -Path "$whl\tensorrt\__init__.py" -Pattern '##' -Quiet) { thro
 # Python loads the extension as tensorrt.tensorrt; on Windows it must be a .pyd
 Copy-Item $Module "$whl\tensorrt\tensorrt.pyd" -Force
 
+$next = [int]$env:PY_MINOR + 1
 @(
   "Metadata-Version: 2.1",
   "Name: tensorrt",
   "Version: $TrtVer",
   "Summary: Unofficial cp3$env:PY_MINOR build of TensorRT 10.16 bindings (bindings-only)",
   "Home-page: https://github.com/NevermindNilas/tensorrt-py3.14",
-  "License: Apache-2.0 bindings; NVIDIA EULA for separately-provided libs"
+  "License: Apache-2.0 bindings; NVIDIA EULA for separately-provided libs",
+  "Requires-Python: >=3.$env:PY_MINOR,<3.$next",
+  "Requires-Dist: tensorrt-cu13-libs==$TrtVer"
 ) | Set-Content -Encoding ascii "$whl\tensorrt-$TrtVer.dist-info\METADATA"
 @(
   "Wheel-Version: 1.0",

@@ -33,6 +33,9 @@ cp "${MODULE}" "${WHL}/tensorrt/$(basename "${MODULE}")"
   printf 'Summary: Unofficial cp3%s build of TensorRT 10.16 bindings (bindings-only)\n' "${PY_MINOR:-}"
   printf 'Home-page: https://github.com/NevermindNilas/tensorrt-py3.14\n'
   printf 'License: Apache-2.0 bindings; NVIDIA EULA for separately-provided libs\n'
+  printf 'Requires-Python: >=3.%s,<3.%s\n' "${PY_MINOR}" "$((PY_MINOR + 1))"
+  # Runtime libs (closed) pulled from NVIDIA's index: --extra-index-url https://pypi.nvidia.com
+  printf 'Requires-Dist: tensorrt-cu13-libs==%s\n' "${TRT_VER}"
 } > "${WHL}/tensorrt-${TRT_VER}.dist-info/METADATA"
 {
   printf 'Wheel-Version: 1.0\n'
