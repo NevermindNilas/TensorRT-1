@@ -169,8 +169,14 @@ jobs:
         with:
           cuda: "13.2.0"
           method: "network"
-          # nvcc bundles include/crt/* (host_defines.h) that cuda_runtime_api.h needs
-          sub-packages: '["cudart", "nvcc"]'
+          # Full toolkit: subpackage split for 13.2 omits include/crt/* (host_defines.h)
+          sub-packages: '[]'
+
+      - name: Verify CUDA headers (crt/)
+        shell: pwsh
+        run: |
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+          Get-ChildItem "$env:CUDA_PATH\include\crt\host_defines.h" | Select-Object FullName
 
       - name: Fetch pybind11 ${{ inputs.pybind11_ref }}
         run: git clone --depth 1 --branch "${{ inputs.pybind11_ref }}" https://github.com/pybind/pybind11 "$env:RUNNER_TEMP\ext\pybind11"
