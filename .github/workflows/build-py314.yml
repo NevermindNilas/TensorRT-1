@@ -21,6 +21,14 @@ on:
         description: "pybind11 git ref (tag/branch) to compile against"
         default: "v2.13.6"
         type: string
+      run_linux:
+        description: "Build the Linux wheel"
+        default: true
+        type: boolean
+      run_windows:
+        description: "Build the Windows wheel"
+        default: true
+        type: boolean
 
 env:
   TRT_VER: "10.16.0.72"
@@ -33,6 +41,7 @@ permissions:
 jobs:
   # ----------------------------------------------------------------- LINUX ---
   linux:
+    if: ${{ inputs.run_linux }}
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:13.2.0-devel-ubuntu24.04
@@ -73,10 +82,13 @@ jobs:
         run: |
           set -eux
           cd /opt
+          df -h /opt /
           # aria2c: multi-connection + robust resume — the NVIDIA CDN drops
           # single-stream wget on this ~1.8GB file intermittently.
+          # file-allocation=none: skip preallocation (faster start, no disk prealloc stall)
           aria2c -x16 -s16 --max-tries=10 --retry-wait=10 --timeout=60 \
                  --max-connection-per-server=16 --continue=true \
+                 --file-allocation=none --summary-interval=10 \
                  -o "${TRT_TARBALL}" "${TRT_URL}"
           test "$(stat -c%s "${TRT_TARBALL}")" -gt 1000000000
           gzip -t "${TRT_TARBALL}"
@@ -138,6 +150,7 @@ jobs:
 
   # --------------------------------------------------------------- WINDOWS ---
   windows:
+    if: ${{ inputs.run_windows }}
     runs-on: windows-2022
     env:
       TRT_ZIP: "TensorRT-10.16.0.72.Windows.amd64.cuda-13.2.zip"
@@ -195,17 +208,20 @@ jobs:
           $trt = "$env:RUNNER_TEMP/TensorRT-$env:TRT_VER" -replace '\\','/'
           $ext = "$env:RUNNER_TEMP/ext" -replace '\\','/'
           $cuda = "$env:CUDA_PATH" -replace '\\','/'
+          # $env: refs don't expand reliably in unquoted -D args -> use locals
+          $pymin = $env:PY_MINOR
+          $trtmaj = $env:TRT_MAJOR
           New-Item -ItemType Directory -Force -Path python\build | Out-Null
           cd python\build
           cmake .. -G "Visual Studio 17 2022" -A x64 `
             -DTRT_BUILD_ENABLE_NEW_PYTHON_FLOW=OFF `
             -DTENSORRT_MODULE=tensorrt `
-            -DPYTHON_MAJOR_VERSION=3 -DPYTHON_MINOR_VERSION=$env:PY_MINOR `
-            -DTARGET=x86_64 -DEXT_PATH="$ext" `
-            -DTENSORRT_ROOT="$trt" -DTENSORRT_LIBPATH="$trt/lib" -DTENSORRT_BUILD="$trt/lib" `
-            -DTENSORRT_MAJOR_VERSION=$env:TRT_MAJOR `
-            -DTRT_NVINFER_NAME=nvinfer -DTRT_ONNXPARSER_NAME=nvonnxparser `
-            -DCUDA_INCLUDE_DIRS="$cuda/include" -DONNX_INC_DIR="$trt/include"
+            "-DPYTHON_MAJOR_VERSION=3" "-DPYTHON_MINOR_VERSION=$pymin" `
+            "-DTARGET=x86_64" "-DEXT_PATH=$ext" `
+            "-DTENSORRT_ROOT=$trt" "-DTENSORRT_LIBPATH=$trt/lib" "-DTENSORRT_BUILD=$trt/lib" `
+            "-DTENSORRT_MAJOR_VERSION=$trtmaj" `
+            "-DTRT_NVINFER_NAME=nvinfer" "-DTRT_ONNXPARSER_NAME=nvonnxparser" `
+            "-DCUDA_INCLUDE_DIRS=$cuda/include" "-DONNX_INC_DIR=$trt/include"
           cmake --build . --config Release -- -m
           Get-ChildItem -Recurse -Include tensorrt.dll,tensorrt.pyd | Select-Object FullName,Length
 
