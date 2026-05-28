@@ -1,0 +1,141 @@
+name: build-py314-bindings
+
+# Proof-of-concept: can the TensorRT Python bindings (old build flow) be
+# compiled for CPython 3.14 (cp314)? Builds against the public TensorRT 10.16
+# GA tarball (headers + libnvinfer.so). No GPU is needed: the bindings only
+# need CUDA *headers* at compile time and link the closed libnvinfer.
+#
+# Matrix runs 3.13 (known-good control) and 3.14 (the question). If 3.13 is
+# green and 3.14 is red, cp314 is the culprit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pybind11_ref:
+        description: "pybind11 git ref (tag/branch) to compile against"
+        default: "v2.13.6"
+        type: string
+
+env:
+  TRT_VER: "10.16.0.72"
+  TRT_TARBALL: "TensorRT-10.16.0.72.Linux.x86_64-gnu.cuda-13.2.tar.gz"
+  TRT_URL: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.16.0/tars/TensorRT-10.16.0.72.Linux.x86_64-gnu.cuda-13.2.tar.gz"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:13.2.0-devel-ubuntu24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        py_minor: ["13", "14"]
+    steps:
+      - name: Install git + base tooling (needed before checkout)
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates wget xz-utils tar \
+            software-properties-common gnupg \
+            build-essential pkg-config
+
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Install CMake >= 3.27
+        run: |
+          set -eux
+          wget -q https://github.com/Kitware/CMake/releases/download/v3.27.9/cmake-3.27.9-linux-x86_64.sh
+          sh cmake-3.27.9-linux-x86_64.sh --prefix=/usr/local --exclude-subdir --skip-license
+          cmake --version
+
+      - name: Install Python 3.${{ matrix.py_minor }} (deadsnakes)
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          add-apt-repository -y ppa:deadsnakes/ppa
+          apt-get update
+          PYV=3.${{ matrix.py_minor }}
+          apt-get install -y --no-install-recommends python${PYV} python${PYV}-dev python${PYV}-venv
+          python${PYV} --version
+          echo "Headers:"; ls -la /usr/include/python${PYV}/ | head
+          echo "pyconfig:"; ls -la /usr/include/x86_64-linux-gnu/python${PYV}/ || true
+
+      - name: Download TensorRT ${{ env.TRT_VER }} GA (headers + libs)
+        run: |
+          set -eux
+          cd /opt
+          wget -q "${TRT_URL}"
+          tar -xf "${TRT_TARBALL}"
+          ls "TensorRT-${TRT_VER}"
+          echo "=== include has NvInfer / NvOnnxParser? ==="
+          ls "TensorRT-${TRT_VER}/include" | grep -iE "NvInfer\.h|NvOnnxParser\.h" || true
+          echo "=== libs ==="
+          ls "TensorRT-${TRT_VER}/lib" | grep -iE "nvinfer|nvonnxparser" | head
+
+      - name: Fetch pybind11 ${{ inputs.pybind11_ref }}
+        run: |
+          set -eux
+          mkdir -p /opt/ext
+          git clone --depth 1 --branch "${{ inputs.pybind11_ref }}" \
+            https://github.com/pybind/pybind11 /opt/ext/pybind11
+          test -f /opt/ext/pybind11/include/pybind11/pybind11.h
+          grep -m1 "version" /opt/ext/pybind11/include/pybind11/detail/common.h | head || true
+
+      - name: Stage Python headers into EXT_PATH layout
+        run: |
+          set -eux
+          PYV=3.${{ matrix.py_minor }}
+          DEST=/opt/ext/python${PYV}/include
+          mkdir -p "${DEST}/x86_64-linux-gnu/python${PYV}"
+          cp -r /usr/include/python${PYV}/* "${DEST}/"
+          # old flow looks for pyconfig.h at <include>/x86_64-linux-gnu/python<ver>/
+          cp /usr/include/x86_64-linux-gnu/python${PYV}/pyconfig.h \
+             "${DEST}/x86_64-linux-gnu/python${PYV}/"
+          echo "=== staged layout ==="
+          find /opt/ext/python${PYV} -name "Python.h" -o -name "pyconfig.h"
+
+      - name: Configure (CMake, old python flow)
+        run: |
+          set -eux
+          PYV=3.${{ matrix.py_minor }}
+          TRT="/opt/TensorRT-${TRT_VER}"
+          export EXT_PATH=/opt/ext
+          cd python
+          mkdir -p build && cd build
+          cmake .. \
+            -DTRT_BUILD_ENABLE_NEW_PYTHON_FLOW=OFF \
+            -DTENSORRT_MODULE=tensorrt \
+            -DPYTHON_MAJOR_VERSION=3 \
+            -DPYTHON_MINOR_VERSION=${{ matrix.py_minor }} \
+            -DTARGET=x86_64 \
+            -DEXT_PATH=${EXT_PATH} \
+            -DTENSORRT_ROOT=${TRT} \
+            -DTENSORRT_LIBPATH=${TRT}/lib \
+            -DTENSORRT_BUILD=${TRT}/lib \
+            -DCUDA_INCLUDE_DIRS=/usr/local/cuda/include \
+            -DONNX_INC_DIR=${TRT}/include \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVERBOSE=ON
+
+      - name: Build bindings
+        run: |
+          set -eux
+          cd python/build
+          make -j"$(nproc)" VERBOSE=1
+
+      - name: Show built artifacts
+        if: always()
+        run: |
+          set -eux
+          find python/build -name "tensorrt*.so" -exec ls -la {} \; || true
+
+      - name: Upload .so artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tensorrt-cp3${{ matrix.py_minor }}-binding
+          path: python/build/**/*.so
+          if-no-files-found: warn
