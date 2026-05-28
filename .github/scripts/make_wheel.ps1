@@ -7,7 +7,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-$TrtVer = $env:TRT_VER; if (-not $TrtVer) { $TrtVer = "10.16.0.72" }
+$TrtVer = $env:TRT_VER; if (-not $TrtVer) { $TrtVer = "10.16.1.11" }
 $repo = $env:GITHUB_WORKSPACE
 $whl = Join-Path $env:RUNNER_TEMP "whl"
 Remove-Item -Recurse -Force $whl -ErrorAction SilentlyContinue
@@ -17,7 +17,7 @@ python "$repo\python\scripts\process_wheel_template.py" `
   --src-dir "$repo\python\packaging\bindings_wheel" --dst-dir "$whl" `
   --filepath tensorrt/__init__.py `
   --trt-module tensorrt --trt-py-version $TrtVer `
-  --cuda-version 13.2 --trt-version 10.16.0 `
+  --cuda-version 13.2 --trt-version 10.16.1 `
   --trt-nvinfer-name nvinfer --trt-onnxparser-name nvonnxparser --plugin-disabled 0
 if (Select-String -Path "$whl\tensorrt\__init__.py" -Pattern '##' -Quiet) { throw "unfilled template token" }
 

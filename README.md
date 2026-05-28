@@ -1,3 +1,40 @@
+# Unofficial CPython 3.14 (cp314) bindings
+
+> This fork builds the TensorRT **10.16.1.11** Python bindings for **CPython 3.14**, which
+> NVIDIA ships no official wheel for. The build is automated in
+> [`.github/workflows/build-py314.yml`](.github/workflows/build-py314.yml) and published to
+> [Releases](https://github.com/NevermindNilas/tensorrt-py3.14/releases).
+
+## Install the dependencies
+
+The wheels are **bindings-only** (the cp-version-specific part). The closed TensorRT runtime
+libs (~1.9 GB) are not bundled, but the wheel declares `Requires-Dist: tensorrt-cu13-libs`,
+so pointing pip at NVIDIA's index pulls them automatically:
+
+```bash
+# Windows (amd64)
+pip install \
+  https://github.com/NevermindNilas/tensorrt-py3.14/releases/download/v10.16.1.11-cp314/tensorrt-10.16.1.11-cp314-cp314-win_amd64.whl \
+  --extra-index-url https://pypi.nvidia.com
+
+# Linux (x86_64)
+pip install \
+  https://github.com/NevermindNilas/tensorrt-py3.14/releases/download/v10.16.1.11-cp314/tensorrt-10.16.1.11-cp314-cp314-linux_x86_64.whl \
+  --extra-index-url https://pypi.nvidia.com
+```
+
+`--extra-index-url https://pypi.nvidia.com` is required — it resolves `tensorrt-cu13-libs==10.16.1.11`
+(the closed nvinfer runtime). Building needs no GPU; **importing** the wheel needs an NVIDIA GPU +
+driver + the runtime libs. Requires CUDA 13.x.
+
+Verify:
+
+```bash
+python -c "import tensorrt as trt; print(trt.__version__); trt.Builder(trt.Logger())"
+```
+
+---
+
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![Documentation](https://img.shields.io/badge/TensorRT-documentation-brightgreen.svg)](https://docs.nvidia.com/deeplearning/sdk/tensorrt-developer-guide/index.html) [![Roadmap](https://img.shields.io/badge/Roadmap-Q1_2026-brightgreen.svg)](documents/tensorrt_roadmap_2026q1.pdf)
 
 # :mega::mega: Announcement :mega::mega:

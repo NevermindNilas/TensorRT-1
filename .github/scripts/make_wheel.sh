@@ -8,7 +8,7 @@ set -euo pipefail
 MODULE="$1"
 TAG="$2"
 PY="${3:-python3}"
-TRT_VER="${TRT_VER:-10.16.0.72}"
+TRT_VER="${TRT_VER:-10.16.1.11}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 WHL="$(mktemp -d)/whl"
@@ -20,7 +20,7 @@ mkdir -p "${WHL}/tensorrt" "${WHL}/tensorrt-${TRT_VER}.dist-info"
   --dst-dir "${WHL}" \
   --filepath tensorrt/__init__.py \
   --trt-module tensorrt --trt-py-version "${TRT_VER}" \
-  --cuda-version 13.2 --trt-version 10.16.0 \
+  --cuda-version 13.2 --trt-version 10.16.1 \
   --trt-nvinfer-name nvinfer --trt-onnxparser-name nvonnxparser --plugin-disabled 0
 ! grep -q '##' "${WHL}/tensorrt/__init__.py"
 
