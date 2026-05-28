@@ -18,6 +18,10 @@ permissions:
   contents: write
   issues: write
 
+env:
+  # Run JS actions on Node24 (Node20 deprecated; forced default 2026-06-02)
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   detect:
     runs-on: ubuntu-24.04
