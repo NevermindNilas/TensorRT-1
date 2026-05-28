@@ -1,13 +1,18 @@
 name: build-py314-bindings
 
-# Build the TensorRT Python bindings (old build flow) for CPython 3.14 (cp314),
-# which NVIDIA ships no official wheel for. Compiles the Apache-2.0 pybind11
-# binding source against the public TensorRT 10.16 GA tarball (headers +
-# libnvinfer.so), assembles a standalone wheel (bindings + bundled closed libs)
-# and publishes it as a GitHub Release.
+# Build the TensorRT 10.16 Python bindings for CPython 3.14 (cp314), which
+# NVIDIA ships no official wheel for. Compiles the Apache-2.0 pybind11 binding
+# source against the public TensorRT 10.16 GA package (headers + import libs),
+# on Linux (x86_64) and Windows (amd64), and publishes the wheels in one
+# GitHub Release.
 #
-# No GPU needed to BUILD (CUDA headers only; links the closed libnvinfer).
-# The resulting wheel needs an NVIDIA GPU + driver + CUDA runtime to import/run.
+# These are BINDINGS-ONLY wheels (the genuinely cp-version-specific part).
+# The closed TensorRT runtime libs are ~4GB and exceed GitHub's 2GB asset cap,
+# so they are NOT bundled. Install NVIDIA's official `tensorrt-libs` (or put a
+# TensorRT 10.16 install on LD_LIBRARY_PATH / PATH) alongside.
+#
+# No GPU needed to BUILD (CUDA headers only; links the closed nvinfer import
+# libs). Importing the wheel needs an NVIDIA GPU + driver + the runtime libs.
 
 on:
   workflow_dispatch:
@@ -19,23 +24,21 @@ on:
 
 env:
   TRT_VER: "10.16.0.72"
-  TRT_TARBALL: "TensorRT-10.16.0.72.Linux.x86_64-gnu.cuda-13.2.tar.gz"
-  TRT_URL: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.16.0/tars/TensorRT-10.16.0.72.Linux.x86_64-gnu.cuda-13.2.tar.gz"
+  TRT_MAJOR: "10"
+  PY_MINOR: "14"
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  # ----------------------------------------------------------------- LINUX ---
+  linux:
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:13.2.0-devel-ubuntu24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        # cp313 already ships officially; it was only a control to prove the
-        # harness. cp314 built green, so the control is moot — cp314 only.
-        py_minor: ["14"]
+    env:
+      TRT_TARBALL: "TensorRT-10.16.0.72.Linux.x86_64-gnu.cuda-13.2.tar.gz"
+      TRT_URL: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.16.0/tars/TensorRT-10.16.0.72.Linux.x86_64-gnu.cuda-13.2.tar.gz"
     steps:
       - name: Install git + base tooling (needed before checkout)
         run: |
@@ -44,8 +47,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             git ca-certificates wget xz-utils tar \
-            software-properties-common gnupg \
-            build-essential pkg-config
+            software-properties-common gnupg build-essential pkg-config
 
       - name: Checkout fork
         uses: actions/checkout@v4
@@ -57,37 +59,28 @@ jobs:
           sh cmake-3.27.9-linux-x86_64.sh --prefix=/usr/local --exclude-subdir --skip-license
           cmake --version
 
-      - name: Install Python 3.${{ matrix.py_minor }} (deadsnakes)
+      - name: Install Python 3.${{ env.PY_MINOR }} (deadsnakes)
         run: |
           set -eux
           export DEBIAN_FRONTEND=noninteractive
           add-apt-repository -y ppa:deadsnakes/ppa
           apt-get update
-          PYV=3.${{ matrix.py_minor }}
+          PYV=3.${PY_MINOR}
           apt-get install -y --no-install-recommends python${PYV} python${PYV}-dev python${PYV}-venv
           python${PYV} --version
-          echo "Headers:"; ls -la /usr/include/python${PYV}/ | head
-          echo "pyconfig:"; ls -la /usr/include/x86_64-linux-gnu/python${PYV}/ || true
 
-      - name: Download TensorRT ${{ env.TRT_VER }} GA (headers + libs)
+      - name: Download TensorRT GA (headers + import libs)
         run: |
           set -eux
           cd /opt
-          # Big (~1.8GB) file off NVIDIA CDN drops intermittently; retry + resume.
           for attempt in 1 2 3 4 5; do
             wget --continue --tries=3 --timeout=60 --waitretry=15 \
                  -O "${TRT_TARBALL}" "${TRT_URL}" && break
             echo "download attempt ${attempt} failed; retrying"; sleep 10
           done
-          # Fail loudly if the archive is short/corrupt rather than letting tar guess.
           test "$(stat -c%s "${TRT_TARBALL}")" -gt 1000000000
           gzip -t "${TRT_TARBALL}"
           tar -xf "${TRT_TARBALL}"
-          ls "TensorRT-${TRT_VER}"
-          echo "=== include has NvInfer / NvOnnxParser? ==="
-          ls "TensorRT-${TRT_VER}/include" | grep -iE "NvInfer\.h|NvOnnxParser\.h" || true
-          echo "=== libs ==="
-          ls "TensorRT-${TRT_VER}/lib" | grep -iE "nvinfer|nvonnxparser" | head
 
       - name: Fetch pybind11 ${{ inputs.pybind11_ref }}
         run: |
@@ -96,151 +89,179 @@ jobs:
           git clone --depth 1 --branch "${{ inputs.pybind11_ref }}" \
             https://github.com/pybind/pybind11 /opt/ext/pybind11
           test -f /opt/ext/pybind11/include/pybind11/pybind11.h
-          grep -m1 "version" /opt/ext/pybind11/include/pybind11/detail/common.h | head || true
 
       - name: Stage Python headers into EXT_PATH layout
         run: |
           set -eux
-          PYV=3.${{ matrix.py_minor }}
+          PYV=3.${PY_MINOR}
           DEST=/opt/ext/python${PYV}/include
           mkdir -p "${DEST}/x86_64-linux-gnu/python${PYV}"
           cp -r /usr/include/python${PYV}/* "${DEST}/"
-          # old flow looks for pyconfig.h at <include>/x86_64-linux-gnu/python<ver>/
           cp /usr/include/x86_64-linux-gnu/python${PYV}/pyconfig.h \
              "${DEST}/x86_64-linux-gnu/python${PYV}/"
-          echo "=== staged layout ==="
-          find /opt/ext/python${PYV} -name "Python.h" -o -name "pyconfig.h"
 
-      - name: Configure (CMake, old python flow)
+      - name: Configure + build bindings (CMake, old python flow)
         run: |
           set -eux
-          PYV=3.${{ matrix.py_minor }}
+          PYV=3.${PY_MINOR}
           TRT="/opt/TensorRT-${TRT_VER}"
           export EXT_PATH=/opt/ext
-          cd python
-          mkdir -p build && cd build
+          cd python && mkdir -p build && cd build
           cmake .. \
             -DTRT_BUILD_ENABLE_NEW_PYTHON_FLOW=OFF \
             -DTENSORRT_MODULE=tensorrt \
-            -DPYTHON_MAJOR_VERSION=3 \
-            -DPYTHON_MINOR_VERSION=${{ matrix.py_minor }} \
-            -DTARGET=x86_64 \
-            -DEXT_PATH=${EXT_PATH} \
-            -DTENSORRT_ROOT=${TRT} \
-            -DTENSORRT_LIBPATH=${TRT}/lib \
-            -DTENSORRT_BUILD=${TRT}/lib \
-            -DCUDA_INCLUDE_DIRS=/usr/local/cuda/include \
-            -DONNX_INC_DIR=${TRT}/include \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DVERBOSE=ON
+            -DPYTHON_MAJOR_VERSION=3 -DPYTHON_MINOR_VERSION=${PY_MINOR} \
+            -DTARGET=x86_64 -DEXT_PATH=${EXT_PATH} \
+            -DTENSORRT_ROOT=${TRT} -DTENSORRT_LIBPATH=${TRT}/lib -DTENSORRT_BUILD=${TRT}/lib \
+            -DCUDA_INCLUDE_DIRS=/usr/local/cuda/include -DONNX_INC_DIR=${TRT}/include \
+            -DCMAKE_BUILD_TYPE=Release
+          make -j"$(nproc)"
+          find . -name "tensorrt*.so" -exec ls -la {} \;
 
-      - name: Build bindings
+      - name: Package bindings-only wheel
         run: |
           set -eux
-          cd python/build
-          make -j"$(nproc)" VERBOSE=1
-
-      - name: Show built artifacts
-        run: |
-          set -eux
-          find python/build -name "tensorrt*.so" -exec ls -la {} \;
-
-      - name: Assemble standalone cp3${{ matrix.py_minor }} wheel
-        run: |
-          set -eux
-          PYV=3.${{ matrix.py_minor }}
-          PY=python${PYV}
-          TRT="/opt/TensorRT-${TRT_VER}"
-          # pip/wheel tooling inside the target interpreter
+          PYV=3.${PY_MINOR}; PY=python${PYV}
           ${PY} -m ensurepip --upgrade
           ${PY} -m pip install --upgrade pip wheel
-
-          WHL=/tmp/whl
-          rm -rf "${WHL}"
-          mkdir -p "${WHL}/tensorrt" "${WHL}/tensorrt_libs" \
-                   "${WHL}/tensorrt-${TRT_VER}.dist-info"
-
-          # 1) Processed __init__ (fills ##TOKENS##)
-          ${PY} python/scripts/process_wheel_template.py \
-            --src-dir python/packaging/bindings_wheel \
-            --dst-dir "${WHL}" \
-            --filepath tensorrt/__init__.py \
-            --trt-module tensorrt \
-            --trt-py-version "${TRT_VER}" \
-            --cuda-version 13.2 \
-            --trt-version 10.16.0 \
-            --trt-nvinfer-name nvinfer \
-            --trt-onnxparser-name nvonnxparser \
-            --plugin-disabled 0
-          # Fail if any template token survived
-          ! grep -q '##' "${WHL}/tensorrt/__init__.py"
-
-          # 2) The cp3xx binding + closed TRT libs (rpath is $ORIGIN/../tensorrt_libs).
-          # zipfile follows symlinks, so copy ONE dereferenced real file per
-          # loadable name (soname for core libs; exact name for builder resources)
-          # to avoid 3x duplication blowing past the release asset size limit.
-          cp python/build/tensorrt/tensorrt.so "${WHL}/tensorrt/"
-          ( cd "${TRT}/lib"
-            for f in *.so.10; do
-              [ -e "$f" ] && cp -L "$f" "${WHL}/tensorrt_libs/"
-            done
-            for f in libnvinfer_builder_resource*.so.10.16.0; do
-              [ -e "$f" ] && cp -L "$f" "${WHL}/tensorrt_libs/"
-            done
-          )
-          printf '# bundled closed-source TensorRT runtime libraries\n' \
-            > "${WHL}/tensorrt_libs/__init__.py"
-          echo "=== bundled libs ==="; ls -la "${WHL}/tensorrt_libs/"
-          du -sh "${WHL}/tensorrt_libs/"
-
-          # 3) Wheel metadata (platform tag — installable from file, not PyPI)
-          MD="${WHL}/tensorrt-${TRT_VER}.dist-info/METADATA"
-          {
-            printf 'Metadata-Version: 2.1\n'
-            printf 'Name: tensorrt\n'
-            printf 'Version: %s\n' "${TRT_VER}"
-            printf 'Summary: UNOFFICIAL CPython %s build of TensorRT 10.16 bindings (POC)\n' "${PYV}"
-            printf 'Home-page: https://github.com/NevermindNilas/tensorrt-py3.14\n'
-            printf 'License: Apache-2.0 bindings + NVIDIA proprietary EULA for libs\n'
-          } > "${MD}"
-          WH="${WHL}/tensorrt-${TRT_VER}.dist-info/WHEEL"
-          {
-            printf 'Wheel-Version: 1.0\n'
-            printf 'Generator: tas-cp314-poc\n'
-            printf 'Root-Is-Purelib: false\n'
-            printf 'Tag: cp%s-cp%s-linux_x86_64\n' "${{ matrix.py_minor }}" "${{ matrix.py_minor }}"
-          } > "${WH}"
-
-          # 4) Pack
-          mkdir -p dist
-          ${PY} -m wheel pack "${WHL}" -d dist
-          echo "=== built wheel ==="
-          ls -la dist/
-          ${PY} -m zipfile -l dist/*.whl | head -40
+          bash .github/scripts/make_wheel.sh \
+            "$(pwd)/python/build/tensorrt/tensorrt.so" \
+            "cp3${PY_MINOR}-cp3${PY_MINOR}-linux_x86_64" \
+            "${PY}"
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tensorrt-cp3${{ matrix.py_minor }}-wheel
+          name: wheel-linux
           path: dist/*.whl
           if-no-files-found: error
+
+  # --------------------------------------------------------------- WINDOWS ---
+  windows:
+    runs-on: windows-2022
+    env:
+      TRT_ZIP: "TensorRT-10.16.0.72.Windows.amd64.cuda-13.2.zip"
+      TRT_URL: "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.16.0/zip/TensorRT-10.16.0.72.Windows.amd64.cuda-13.2.zip"
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.${{ env.PY_MINOR }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.${{ env.PY_MINOR }}"
+
+      - name: Install CUDA toolkit (headers for compile)
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: "13.2.0"
+          method: "network"
+          sub-packages: '["cudart", "nvcc"]'
+
+      - name: Fetch pybind11 ${{ inputs.pybind11_ref }}
+        run: git clone --depth 1 --branch "${{ inputs.pybind11_ref }}" https://github.com/pybind/pybind11 "$env:RUNNER_TEMP\ext\pybind11"
+
+      - name: Download + unzip TensorRT GA (headers + import libs)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = "$env:RUNNER_TEMP\$env:TRT_ZIP"
+          Invoke-WebRequest -Uri $env:TRT_URL -OutFile $zip -MaximumRetryCount 5 -RetryIntervalSec 15
+          if ((Get-Item $zip).Length -lt 500000000) { throw "TRT zip too small" }
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP -Force
+          Get-ChildItem "$env:RUNNER_TEMP\TensorRT-$env:TRT_VER\lib" -Filter *.lib | Select-Object Name
+
+      - name: Stage Python headers/libs into EXT_PATH layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pyv = "3.$env:PY_MINOR"
+          $base = (python -c "import sys;print(sys.base_prefix)").Trim()
+          $dest = "$env:RUNNER_TEMP\ext\python$pyv"
+          New-Item -ItemType Directory -Force -Path "$dest\include\win\python$pyv" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$dest\lib" | Out-Null
+          Copy-Item "$base\include\*" "$dest\include\" -Recurse -Force
+          # old flow looks for pyconfig.h under include/win/python<ver>/
+          Copy-Item "$base\include\pyconfig.h" "$dest\include\win\python$pyv\" -Force
+          # python3XX.lib (no dot)
+          $lib = "python$($env:PY_MINOR -replace '\.','')"
+          Copy-Item "$base\libs\python3$env:PY_MINOR.lib" "$dest\lib\$lib.lib" -Force
+          Get-ChildItem -Recurse "$dest" -Include Python.h,pyconfig.h,*.lib | Select-Object FullName
+
+      - name: Configure + build bindings (MSVC, old python flow)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $trt = "$env:RUNNER_TEMP\TensorRT-$env:TRT_VER"
+          $ext = "$env:RUNNER_TEMP\ext"
+          New-Item -ItemType Directory -Force -Path python\build | Out-Null
+          cd python\build
+          cmake .. -G "Visual Studio 17 2022" -A x64 `
+            -DTRT_BUILD_ENABLE_NEW_PYTHON_FLOW=OFF `
+            -DTENSORRT_MODULE=tensorrt `
+            -DPYTHON_MAJOR_VERSION=3 -DPYTHON_MINOR_VERSION=$env:PY_MINOR `
+            -DTARGET=x86_64 -DEXT_PATH="$ext" `
+            -DTENSORRT_ROOT="$trt" -DTENSORRT_LIBPATH="$trt\lib" -DTENSORRT_BUILD="$trt\lib" `
+            -DTENSORRT_MAJOR_VERSION=$env:TRT_MAJOR `
+            -DTRT_NVINFER_NAME=nvinfer -DTRT_ONNXPARSER_NAME=nvonnxparser `
+            -DCUDA_INCLUDE_DIRS="$env:CUDA_PATH\include" -DONNX_INC_DIR="$trt\include"
+          cmake --build . --config Release -- -m
+          Get-ChildItem -Recurse -Include tensorrt.dll,tensorrt.pyd | Select-Object FullName,Length
+
+      - name: Package bindings-only wheel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --upgrade pip wheel
+          $pyd = Get-ChildItem -Recurse python\build -Include tensorrt.dll,tensorrt.pyd | Select-Object -First 1
+          if (-not $pyd) { throw "binding module not found" }
+          & "$env:GITHUB_WORKSPACE\.github\scripts\make_wheel.ps1" `
+            -Module $pyd.FullName -Tag "cp3$env:PY_MINOR-cp3$env:PY_MINOR-win_amd64"
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows
+          path: dist/*.whl
+          if-no-files-found: error
+
+  # --------------------------------------------------------------- RELEASE ---
+  release:
+    needs: [linux, windows]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -la artifacts/ || true
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.TRT_VER }}-cp3${{ matrix.py_minor }}
-          name: TensorRT ${{ env.TRT_VER }} bindings for CPython 3.${{ matrix.py_minor }} (unofficial)
+          tag_name: v${{ env.TRT_VER }}-cp3${{ env.PY_MINOR }}
+          name: TensorRT ${{ env.TRT_VER }} bindings for CPython 3.${{ env.PY_MINOR }} (unofficial)
           body: |
-            **Unofficial** proof-of-concept build of the NVIDIA TensorRT
-            ${{ env.TRT_VER }} Python bindings for **CPython 3.${{ matrix.py_minor }}** (`cp3${{ matrix.py_minor }}`),
-            which NVIDIA does not ship an official wheel for.
+            **Unofficial** build of the NVIDIA TensorRT ${{ env.TRT_VER }} Python
+            **bindings** for **CPython 3.${{ env.PY_MINOR }}** (`cp3${{ env.PY_MINOR }}`), which
+            NVIDIA ships no official wheel for.
 
-            - Bindings (pybind11) compiled from the Apache-2.0 OSS source.
-            - Bundles the closed-source TensorRT runtime libs (NVIDIA EULA applies).
-            - Built on a CPU runner (no GPU needed to build); **requires an
-              NVIDIA GPU + driver + CUDA runtime at import/runtime**.
-            - Platform-tagged `linux_x86_64`: install from file, e.g.
-              `pip install ./tensorrt-${{ env.TRT_VER }}-cp3${{ matrix.py_minor }}-cp3${{ matrix.py_minor }}-linux_x86_64.whl`
+            **Bindings-only** wheels (Linux x86_64 + Windows amd64). The closed
+            TensorRT runtime libs (~4GB) exceed GitHub's 2GB asset cap and are
+            **not bundled** — install NVIDIA's official `tensorrt-libs`, or put a
+            TensorRT ${{ env.TRT_VER }} install on `LD_LIBRARY_PATH` (Linux) /
+            `PATH` (Windows) so the bindings can load `nvinfer`.
+
+            - pybind11 binding source (Apache-2.0) compiled against the TRT GA package.
+            - Built on CPU runners (no GPU to build); needs an NVIDIA GPU + driver
+              + the runtime libs to import/run.
+            - Platform-tagged wheels: install from file, e.g.
+              `pip install ./tensorrt-${{ env.TRT_VER }}-cp3${{ env.PY_MINOR }}-cp3${{ env.PY_MINOR }}-win_amd64.whl`
             - Not affiliated with or endorsed by NVIDIA.
-          files: dist/*.whl
-          fail_on_unmatched_files: true
+          files: artifacts/*.whl
+          fail_on_unmatched_files: false
